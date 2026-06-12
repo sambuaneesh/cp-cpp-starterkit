@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="${1:-}"
+name="${2:-}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+template_file="$repo_root/templates/main.cpp"
+
+if [[ -z "$url" ]]; then
+    echo "Usage: cpnew <problem-url> [folder-name]"
+    exit 1
+fi
+
+slugify() {
+    echo "$1" |
+        tr '[:upper:]' '[:lower:]' |
+        sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//'
+}
+
+yaml_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+detect_judge() {
+    local u="$1"
+
+    if [[ "$u" == *"codeforces.com"* ]]; then
+        echo "codeforces"
+    elif [[ "$u" == *"atcoder.jp"* ]]; then
+        echo "atcoder"
+    elif [[ "$u" == *"judge.yosupo.jp"* ]]; then
+        echo "library-checker"
+    elif [[ "$u" == *"yukicoder.me"* ]]; then
+        echo "yukicoder"
+    elif [[ "$u" == *"onlinejudge.u-aizu.ac.jp"* ]]; then
+        echo "aizu"
+    elif [[ "$u" == *"open.kattis.com"* ]]; then
+        echo "kattis"
+    else
+        echo "unknown"
+    fi
+}
+
+judge="$(detect_judge "$url")"
+contest_id=""
+problem_id=""
+
+if [[ -z "$name" ]]; then
+    # Codeforces contest/gym
+    if [[ "$url" =~ codeforces\.com/(contest|gym)/([0-9]+)/problem/([A-Za-z0-9]+) ]]; then
+        contest_id="${BASH_REMATCH[2]}"
+        problem_id="${BASH_REMATCH[3]}"
+        name="cf_${contest_id}_${problem_id}"
+
+    # Codeforces problemset
+    elif [[ "$url" =~ codeforces\.com/problemset/problem/([0-9]+)/([A-Za-z0-9]+) ]]; then
+        contest_id="${BASH_REMATCH[1]}"
+        problem_id="${BASH_REMATCH[2]}"
+        name="cf_${contest_id}_${problem_id}"
+
+    # AtCoder
+    elif [[ "$url" =~ atcoder\.jp/contests/([^/]+)/tasks/([^/?#]+) ]]; then
+        contest_id="$(slugify "${BASH_REMATCH[1]}")"
+        problem_id="$(slugify "${BASH_REMATCH[2]}")"
+        name="atc_${contest_id}_${problem_id}"
+
+    # Library Checker / yosupo
+    elif [[ "$url" =~ judge\.yosupo\.jp/problem/([^/?#]+) ]]; then
+        problem_id="$(slugify "${BASH_REMATCH[1]}")"
+        name="yosupo_${problem_id}"
+
+    # yukicoder
+    elif [[ "$url" =~ yukicoder\.me/problems/no/([0-9]+) ]]; then
+        problem_id="${BASH_REMATCH[1]}"
+        name="yuki_${problem_id}"
+
+    # Aizu Online Judge
+    elif [[ "$url" =~ onlinejudge\.u-aizu\.ac\.jp/.*/problems/([^/?#]+) ]]; then
+        problem_id="$(slugify "${BASH_REMATCH[1]}")"
+        name="aoj_${problem_id}"
+
+    # Kattis
+    elif [[ "$url" =~ open\.kattis\.com/problems/([^/?#]+) ]]; then
+        problem_id="$(slugify "${BASH_REMATCH[1]}")"
+        name="kattis_${problem_id}"
+
+    # Fallback for any other oj-supported site
+    else
+        host="$(echo "$url" | sed -E 's#https?://([^/]+)/?.*#\1#' | sed -E 's#www\.##')"
+        last="$(echo "$url" | sed -E 's#/$##; s#.*/([^/?#]+).*#\1#')"
+        problem_id="$(slugify "$last")"
+        name="$(slugify "${host}_${last}")"
+
+        if [[ -z "$name" || "$name" == "$url" ]]; then
+            name="problem_$(date +%Y%m%d_%H%M%S)"
+        fi
+    fi
+else
+    # If user gave a custom folder name, still try to infer ids from URL.
+    if [[ "$url" =~ codeforces\.com/(contest|gym|problemset/problem)/([0-9]+)/problem?/??([A-Za-z0-9]+)? ]]; then
+        :
+    fi
+fi
+
+mkdir -p "$name"
+cd "$name"
+
+if [[ ! -f main.cpp ]]; then
+    if [[ ! -f "$template_file" ]]; then
+        echo "Template not found: $template_file"
+        exit 1
+    fi
+
+    cp "$template_file" main.cpp
+fi
+
+if command -v oj >/dev/null 2>&1; then
+    echo "Downloading samples with oj..."
+    oj download "$url" || {
+        echo
+        echo "Warning: oj could not download samples."
+        echo "This site/problem may be unsupported, login-protected, or blocked."
+        echo "You can still add manual tests using input.txt or a test/ folder."
+    }
+else
+    echo "Warning: oj not found. Skipping sample download."
+fi
+
+if [[ ! -f notes.md ]]; then
+    created_at="$(date +%F)"
+
+    # Optional CP31 metadata.
+    # Only added when the problem is created inside a path like:
+    # .../cp31/800/...
+    sheet_metadata=""
+    parent_path="$(pwd)"
+
+    if [[ "$parent_path" =~ /cp31/([0-9]+)(/|$) ]]; then
+        sheet_metadata="sheet: \"cp31\"
+rating: ${BASH_REMATCH[1]}"
+    fi
+
+    cat >notes.md <<EOF
+---
+title: "$(yaml_escape "$name")"
+link: "$(yaml_escape "$url")"
+judge: "$judge"
+status: "unsolved"
+created_at: "$created_at"
+folder: "$(yaml_escape "$name")"
+EOF
+
+    if [[ -n "$contest_id" ]]; then
+        cat >>notes.md <<EOF
+contest_id: "$(yaml_escape "$contest_id")"
+EOF
+    fi
+
+    if [[ -n "$problem_id" ]]; then
+        cat >>notes.md <<EOF
+problem_id: "$(yaml_escape "$problem_id")"
+EOF
+    fi
+
+    if [[ -n "$sheet_metadata" ]]; then
+        cat >>notes.md <<EOF
+$sheet_metadata
+EOF
+    fi
+
+    cat >>notes.md <<EOF
+---
+
+# $name
+
+## Notes
+
+EOF
+fi
+
+echo
+echo "Created: $PWD"

@@ -1,0 +1,594 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+src="${1:-main.cpp}"
+
+if [[ ! -f "$src" ]]; then
+    echo "File not found: $src"
+    exit 1
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+exe="$tmp/main"
+base_name="$(basename "$src" .cpp)"
+report_file="${base_name}.cprun.md"
+
+g++ -std=c++20 -O2 -pipe -Wall -Wextra -Wshadow -DLOCAL "$src" -o "$exe"
+
+generate_md_report() {
+    python3 - "$exe" "$report_file" "$(pwd)" <<'PY'
+import html
+import subprocess
+import sys
+from pathlib import Path
+from datetime import datetime
+
+exe = sys.argv[1]
+report_file = Path(sys.argv[2])
+folder = Path(sys.argv[3])
+test_dir = folder / "test"
+
+def read_lines(path: Path):
+    if not path.exists():
+        return []
+    return path.read_text(errors="replace").splitlines()
+
+def escape(s: str) -> str:
+    return html.escape(s, quote=False)
+
+def block(lines, empty_text="(empty)"):
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+
+    if not lines:
+        return f"<span class='empty'>{escape(empty_text)}</span>"
+
+    return "<pre>" + escape("\n".join(lines)) + "</pre>"
+
+def md_code_block(lines, empty_text="No debug output captured."):
+    if isinstance(lines, str):
+        lines = lines.splitlines()
+
+    if not lines:
+        return f"> {empty_text}"
+
+    content = "\n".join(lines).replace("```", "` ` `")
+    return f"```text\n{content}\n```"
+
+def run_program_with_lines(input_lines):
+    data = ("\n".join(input_lines) + "\n").encode()
+
+    proc = subprocess.run(
+        [exe],
+        input=data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode(errors="replace").splitlines(),
+        "stderr": proc.stderr.decode(errors="replace").splitlines(),
+    }
+
+def run_program_file(input_path: Path):
+    data = input_path.read_bytes()
+
+    proc = subprocess.run(
+        [exe],
+        input=data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode(errors="replace").splitlines(),
+        "stderr": proc.stderr.decode(errors="replace").splitlines(),
+    }
+
+def get_case_lines_override():
+    override = folder / ".cprun-case-lines"
+    if not override.exists():
+        return None
+
+    try:
+        n = int(override.read_text().strip())
+        if n > 0:
+            return n
+    except Exception:
+        return None
+
+    return None
+
+def has_no_t_override():
+    return (folder / ".cprun-no-t").exists()
+
+def split_cases(input_lines, expected_lines, got_lines):
+    """
+    Best-effort testcase splitter.
+
+    Automatic mode works when:
+    - first input line is T
+    - expected output has T lines
+    - your output has T lines
+    - remaining input lines can be split equally into T chunks
+
+    Optional:
+    - .cprun-case-lines containing N means each testcase has exactly N input lines
+    - .cprun-no-t means isolated debug runs will not prepend T=1
+    """
+    if not input_lines:
+        return None
+
+    first = input_lines[0].strip()
+    if not first.isdigit():
+        return None
+
+    t = int(first)
+    if t <= 0:
+        return None
+
+    if len(expected_lines) != t or len(got_lines) != t:
+        return None
+
+    rest = input_lines[1:]
+    override = get_case_lines_override()
+
+    if override is not None:
+        if len(rest) >= t * override:
+            return [rest[i * override:(i + 1) * override] for i in range(t)]
+
+    if len(rest) % t == 0:
+        per_case = len(rest) // t
+        if per_case > 0:
+            return [rest[i * per_case:(i + 1) * per_case] for i in range(t)]
+
+    return None
+
+def status_badge(label):
+    if label == "AC":
+        return "<span class='badge ac'>AC</span>"
+    if label == "RE":
+        return "<span class='badge re'>RE</span>"
+    return "<span class='badge wa'>WA</span>"
+
+def make_debug_input(case_input):
+    if has_no_t_override():
+        return case_input[:]
+    return ["1"] + case_input
+
+samples = sorted(test_dir.glob("*.in"))
+failed_cards = []
+summary_rows = []
+total_failed = 0
+total_cases = 0
+
+for input_path in samples:
+    expected_path = input_path.with_suffix(".out")
+    if not expected_path.exists():
+        continue
+
+    sample_name = input_path.stem
+    input_lines = read_lines(input_path)
+    expected_lines = read_lines(expected_path)
+
+    full_run = run_program_file(input_path)
+    got_lines = full_run["stdout"]
+
+    cases = split_cases(input_lines, expected_lines, got_lines)
+
+    if cases is not None:
+        total_cases += len(cases)
+
+        for idx, case_input in enumerate(cases, start=1):
+            got = got_lines[idx - 1] if idx - 1 < len(got_lines) else ""
+            exp = expected_lines[idx - 1] if idx - 1 < len(expected_lines) else ""
+
+            if got.strip() == exp.strip():
+                continue
+
+            total_failed += 1
+
+            debug_input = make_debug_input(case_input)
+            isolated = run_program_with_lines(debug_input)
+
+            isolated_stdout = isolated["stdout"]
+            isolated_stderr = isolated["stderr"]
+            isolated_returncode = isolated["returncode"]
+
+            verdict = "WA"
+            if isolated_returncode != 0:
+                verdict = "RE"
+
+            isolated_first_output = isolated_stdout[0] if isolated_stdout else ""
+
+            mismatch_note = ""
+            if isolated_first_output.strip() != got.strip():
+                mismatch_note = f"""
+<div class="note warning">
+  The isolated rerun output differs from the full sample output.
+  This usually means the solution depends on previous testcases, global state, or the testcase splitter guessed incorrectly.
+</div>
+"""
+
+            debug_box = f"""
+### dbg() / stderr
+
+{md_code_block(isolated_stderr, "No debug output captured. Add dbg(...) calls or write to cerr.")}
+"""
+
+            if isolated_returncode != 0:
+                debug_box += f"""
+> Runtime status: program exited with code `{isolated_returncode}` on isolated testcase run.
+"""
+
+            failed_cards.append(f"""
+<section class="case-card">
+  <div class="case-header">
+    <div>
+      <span class="sample-name">{escape(sample_name)}</span>
+      <span class="case-number">Testcase #{idx}</span>
+    </div>
+    {status_badge(verdict)}
+  </div>
+
+  <table class="case-table">
+    <thead>
+      <tr>
+        <th>Input for this testcase</th>
+        <th>Your output</th>
+        <th>Expected output</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>{block(case_input)}</td>
+        <td class="wrong">{block([got] if got else [])}</td>
+        <td class="expected">{block([exp] if exp else [])}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  {mismatch_note}
+
+</section>
+
+{debug_box}
+""")
+
+            summary_rows.append(
+                f"<tr>"
+                f"<td>{escape(sample_name)}</td>"
+                f"<td>{idx}</td>"
+                f"<td class='bad'>{verdict}</td>"
+                f"<td><code>{escape(got)}</code></td>"
+                f"<td><code>{escape(exp)}</code></td>"
+                f"</tr>"
+            )
+
+    else:
+        total_cases += 1
+        same = [x.strip() for x in got_lines] == [x.strip() for x in expected_lines]
+
+        if not same or full_run["returncode"] != 0:
+            total_failed += 1
+
+            summary_rows.append(
+                f"<tr>"
+                f"<td>{escape(sample_name)}</td>"
+                f"<td>unknown</td>"
+                f"<td class='bad'>WA</td>"
+                f"<td colspan='2'>Could not split sample into individual testcases</td>"
+                f"</tr>"
+            )
+
+            stderr_box = f"""
+### dbg() / stderr
+
+{md_code_block(full_run["stderr"], "No debug output captured.")}
+"""
+
+            failed_cards.append(f"""
+<section class="case-card">
+  <div class="case-header">
+    <div>
+      <span class="sample-name">{escape(sample_name)}</span>
+      <span class="case-number">Could not auto-split testcases</span>
+    </div>
+    {status_badge("WA")}
+  </div>
+
+  <p class="hint">
+    This sample could not be split into individual testcases automatically.
+    If every testcase uses a fixed number of input lines, create
+    <code>.cprun-case-lines</code> with that number.
+  </p>
+
+  <table class="case-table">
+    <thead>
+      <tr>
+        <th>Full input</th>
+        <th>Your output</th>
+        <th>Expected output</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>{block(input_lines)}</td>
+        <td class="wrong">{block(got_lines)}</td>
+        <td class="expected">{block(expected_lines)}</td>
+      </tr>
+    </tbody>
+  </table>
+
+</section>
+
+{stderr_box}
+""")
+
+if total_failed == 0:
+    if report_file.exists():
+        report_file.unlink()
+    sys.exit(0)
+
+summary_table = "\n".join(summary_rows)
+
+report = f"""# CP Run Report
+
+<div class="report-meta">
+
+| Field | Value |
+|---|---|
+| Folder | <code>{escape(str(folder))}</code> |
+| Generated | <code>{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</code> |
+| Failed cases | <strong>{total_failed}</strong> |
+| Detected cases | <strong>{total_cases}</strong> |
+
+</div>
+
+## Failed testcase summary
+
+<table class="summary-table">
+  <thead>
+    <tr>
+      <th>Sample</th>
+      <th>Testcase</th>
+      <th>Status</th>
+      <th>Your output</th>
+      <th>Expected</th>
+    </tr>
+  </thead>
+  <tbody>
+    {summary_table}
+  </tbody>
+</table>
+
+## Failed testcases
+
+{"".join(failed_cards)}
+
+<style>
+body {{
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}}
+
+.report-meta {{
+  margin: 1rem 0 1.25rem;
+}}
+
+.summary-table {{
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0 2rem;
+}}
+
+.summary-table th,
+.summary-table td {{
+  border: 1px solid #3f3f46;
+  padding: 0.55rem 0.7rem;
+}}
+
+.summary-table th {{
+  background: #18181b;
+}}
+
+.case-card {{
+  border: 1px solid #3f3f46;
+  border-radius: 16px;
+  padding: 1rem;
+  margin: 1.4rem 0;
+  background: linear-gradient(180deg, rgba(39,39,42,0.38), rgba(24,24,27,0.18));
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+}}
+
+.case-header {{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}}
+
+.sample-name {{
+  font-weight: 800;
+  font-size: 1.05rem;
+}}
+
+.case-number {{
+  margin-left: 0.6rem;
+  opacity: 0.75;
+}}
+
+.badge {{
+  display: inline-block;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 0.8rem;
+}}
+
+.badge.wa {{
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}}
+
+.badge.re {{
+  background: rgba(251, 146, 60, 0.18);
+  color: #fdba74;
+  border: 1px solid rgba(251, 146, 60, 0.45);
+}}
+
+.badge.ac {{
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+}}
+
+.case-table {{
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  margin-bottom: 1rem;
+}}
+
+.case-table th {{
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid #3f3f46;
+  background: #18181b;
+}}
+
+.case-table td {{
+  vertical-align: top;
+  width: 33.33%;
+  padding: 0.75rem;
+  border-right: 1px solid #3f3f46;
+  background: rgba(9, 9, 11, 0.45);
+}}
+
+.case-table td:last-child {{
+  border-right: none;
+}}
+
+pre {{
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}}
+
+.wrong {{
+  background: rgba(239, 68, 68, 0.09) !important;
+}}
+
+.expected {{
+  background: rgba(34, 197, 94, 0.08) !important;
+}}
+
+.bad {{
+  color: #fca5a5;
+  font-weight: 800;
+}}
+
+.empty {{
+  opacity: 0.65;
+  font-style: italic;
+}}
+
+.hint {{
+  opacity: 0.8;
+  margin: 0.4rem 0 1rem;
+}}
+
+.debug-details {{
+  margin-top: 0.8rem;
+  border-top: 1px solid #3f3f46;
+  padding-top: 0.8rem;
+}}
+
+.debug-details summary {{
+  cursor: pointer;
+  font-weight: 800;
+  margin-bottom: 0.8rem;
+}}
+
+.debug-grid {{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.85rem;
+  margin-bottom: 0.85rem;
+}}
+
+.debug-grid > div,
+.debug-box {{
+  border: 1px solid #3f3f46;
+  border-radius: 12px;
+  padding: 0.75rem;
+  background: rgba(9, 9, 11, 0.38);
+}}
+
+.debug-title,
+.debug-subtitle {{
+  font-weight: 800;
+  margin-bottom: 0.5rem;
+  opacity: 0.95;
+}}
+
+.debug-box {{
+  margin-top: 0.85rem;
+}}
+
+.debug-box.muted {{
+  opacity: 0.78;
+}}
+
+.debug-box.error {{
+  border-color: rgba(251, 146, 60, 0.55);
+  background: rgba(251, 146, 60, 0.08);
+}}
+
+.note.warning {{
+  border: 1px solid rgba(251, 146, 60, 0.45);
+  background: rgba(251, 146, 60, 0.09);
+  color: #fdba74;
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  margin: 0.75rem 0;
+}}
+</style>
+"""
+
+report_file.write_text(report)
+PY
+}
+
+if [[ -d test ]]; then
+    # Keep normal oj output in terminal.
+    if oj test -c "$exe"; then
+        rm -f "$report_file"
+        exit 0
+    else
+        generate_md_report || true
+        echo
+        echo "Pretty Markdown report written to: $report_file"
+        exit 1
+    fi
+
+elif [[ -f input.txt ]]; then
+    "$exe" <input.txt >output.txt 2>debug.log
+    echo "=== output.txt ==="
+    cat output.txt
+    echo
+    echo "=== debug.log ==="
+    cat debug.log
+
+else
+    "$exe"
+fi

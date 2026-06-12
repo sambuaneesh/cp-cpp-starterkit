@@ -1,0 +1,23 @@
+[
+  {
+    "label": "CP: Run current file",
+    "command": "$ZED_WORKTREE_ROOT/scripts/cprun",
+    "args": ["$ZED_FILE"],
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+  },
+  {
+    "label": "CP: Sanitize current file",
+    "command": "bash",
+    "args": [
+      "-lc",
+      "g++ -std=c++20 -g -O0 -Wall -Wextra -Wshadow -DLOCAL -fsanitize=address,undefined \"$ZED_FILE\" -o /tmp/cp_san && /tmp/cp_san",
+    ],
+    "cwd": "$ZED_DIRNAME",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+  },
+]

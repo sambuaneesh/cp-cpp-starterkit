@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+scripts_dir="$repo_root/scripts"
+marker_start="# >>> cp-journey-template >>>"
+marker_end="# <<< cp-journey-template <<<"
+
+usage() {
+    cat <<EOF
+Usage: ./scripts/setup [--no-path]
+
+Installs/updates oj using uv and adds this repo's scripts directory to PATH.
+EOF
+}
+
+update_path=1
+for arg in "$@"; do
+    case "$arg" in
+    --no-path)
+        update_path=0
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+    esac
+done
+
+if ! command -v uv >/dev/null 2>&1; then
+    cat >&2 <<EOF
+uv was not found on PATH.
+
+Install uv first, then rerun:
+  ./scripts/setup
+EOF
+    exit 1
+fi
+
+echo "Installing/updating oj with uv..."
+uv tool install --upgrade git+https://github.com/sambuaneesh/oj.git
+
+uv_bin_dir="$(uv tool dir --bin 2>/dev/null || true)"
+if [[ -z "$uv_bin_dir" ]]; then
+    uv_bin_dir="$HOME/.local/bin"
+fi
+if [[ -d "$uv_bin_dir" ]]; then
+    uv_bin_dir="$(cd -- "$uv_bin_dir" && pwd -P)"
+fi
+
+if [[ "$update_path" -eq 0 ]]; then
+    echo
+    echo "PATH update skipped."
+    echo "Add these directories to PATH manually:"
+    echo "  $scripts_dir"
+    echo "  $uv_bin_dir"
+    exit 0
+fi
+
+shell_name="$(basename "${SHELL:-}")"
+case "$shell_name" in
+zsh)
+    rc_file="$HOME/.zshrc"
+    ;;
+bash)
+    rc_file="$HOME/.bashrc"
+    ;;
+*)
+    rc_file="$HOME/.profile"
+    ;;
+esac
+
+mkdir -p "$(dirname "$rc_file")"
+touch "$rc_file"
+
+tmp_file="$(mktemp)"
+awk -v start="$marker_start" -v end="$marker_end" '
+    $0 == start { skip = 1; next }
+    $0 == end { skip = 0; next }
+    !skip { print }
+' "$rc_file" >"$tmp_file"
+
+cat >>"$tmp_file" <<EOF
+
+$marker_start
+export PATH="$scripts_dir:$uv_bin_dir:\$PATH"
+$marker_end
+EOF
+
+mv "$tmp_file" "$rc_file"
+
+echo
+echo "Updated PATH block in $rc_file"
+echo "Open a new terminal or run:"
+echo "  source $rc_file"
+echo
+echo "Installed commands:"
+echo "  cpnew  - create a problem folder from a URL"
+echo "  cprun  - compile and test the current solution"
