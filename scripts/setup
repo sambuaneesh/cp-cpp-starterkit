@@ -6,6 +6,8 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 scripts_dir="$repo_root/scripts"
 marker_start="# >>> cp-journey-template >>>"
 marker_end="# <<< cp-journey-template <<<"
+default_upstream_url="git@github.com:sambuaneesh/cp-cpp-starterkit.git"
+template_upstream_url="${CP_TEMPLATE_UPSTREAM_URL:-$default_upstream_url}"
 
 usage() {
     cat <<EOF
@@ -13,6 +15,52 @@ Usage: ./scripts/setup [--no-path]
 
 Installs/updates oj using uv and adds this repo's scripts directory to PATH.
 EOF
+}
+
+is_starterkit_remote() {
+    case "$1" in
+    "$default_upstream_url" | \
+        "git@github.com:sambuaneesh/cp-cpp-starterkit" | \
+        "https://github.com/sambuaneesh/cp-cpp-starterkit.git" | \
+        "https://github.com/sambuaneesh/cp-cpp-starterkit")
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+configure_upstream_remote() {
+    if ! command -v git >/dev/null 2>&1; then
+        echo "Git not found. Skipping upstream remote setup."
+        return
+    fi
+
+    if ! git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Not inside a Git repository. Skipping upstream remote setup."
+        return
+    fi
+
+    origin_url="$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)"
+    if [[ -z "$origin_url" ]]; then
+        echo "No origin remote found. Skipping upstream remote setup."
+        return
+    fi
+
+    if is_starterkit_remote "$origin_url"; then
+        echo "Origin is the starterkit repository. Skipping upstream remote setup."
+        return
+    fi
+
+    if git -C "$repo_root" remote get-url upstream >/dev/null 2>&1; then
+        echo "Upstream remote already exists. Leaving it unchanged."
+        return
+    fi
+
+    git -C "$repo_root" remote add upstream "$template_upstream_url"
+    git -C "$repo_root" remote set-url --push upstream DISABLED
+    echo "Added upstream remote: $template_upstream_url"
 }
 
 update_path=1
@@ -52,6 +100,8 @@ fi
 if [[ -d "$uv_bin_dir" ]]; then
     uv_bin_dir="$(cd -- "$uv_bin_dir" && pwd -P)"
 fi
+
+configure_upstream_remote
 
 if [[ "$update_path" -eq 0 ]]; then
     echo

@@ -18,21 +18,17 @@ git clone <your-fork-url>
 cd <repo-name>
 ```
 
-3. Add the original template repository as `upstream`:
-
-```sh
-git remote add upstream <template-repo-url>
-```
-
-4. Run setup:
+3. Run setup:
 
 ```sh
 ./scripts/setup
 ```
 
-5. Open a new terminal or source the shell rc file printed by setup.
-6. Create practice folders under `practice/`.
-7. Start problems with `cpnew`.
+4. Open a new terminal or source the shell rc file printed by setup.
+5. Create practice folders under `practice/`.
+6. Start problems with `cpnew`.
+
+The setup script also configures `upstream` automatically when the repo looks like a fork or personal clone. It does not fetch or merge upstream updates.
 
 Check remotes:
 
@@ -44,7 +40,7 @@ Expected setup:
 
 ```text
 origin    <your-fork-url>
-upstream  <template-repo-url>
+upstream  git@github.com:sambuaneesh/cp-cpp-starterkit.git
 ```
 
 ## Pull Template Updates
@@ -109,6 +105,12 @@ It also adds these directories to `PATH`:
 
 - this repository's `scripts/` directory, so `cpnew` and `cprun` work from any problem folder
 - uv's tool bin directory, so `oj` is available from the terminal
+
+It also adds the starterkit as `upstream` when appropriate. To use a different upstream URL:
+
+```sh
+CP_TEMPLATE_UPSTREAM_URL=<template-repo-url> ./scripts/setup
+```
 
 After setup, open a new terminal or source the shell rc file printed by the script.
 
